@@ -32,7 +32,7 @@ jobs:
             libcap-dev libbsd-dev libmnl-dev libaio-dev \
             libnet1-dev libgnutls28-dev \
             iproute2 asciidoc xmlto \
-            uuid-dev
+            uuid-dev libdrm-dev
           # Optional AMD plugin support noted by the guide
           sudo apt-get install -y libdrm-dev || true
 
@@ -50,11 +50,22 @@ jobs:
 
       - name: Verify NV GPU flag is present (runtime feature toggle)
         run: |
-          if ! pkgroot/usr/sbin/criu --help | grep -q -- '--gpu'; then
-            echo "ERROR: criu --help does not show --gpu; build lacks GPU flag."
+          # Verify CUDA plugin got installed
+          if [ -f pkgroot/var/lib/criu/cuda_plugin.so ]; then
+            echo "OK: Found CUDA plugin at /var/lib/criu/cuda_plugin.so"
+          elif ls pkgroot/usr/lib*/criu/cuda_plugin.so >/dev/null 2>&1; then
+            echo "OK: Found CUDA plugin under \$libdir/criu"
+          else
+            echo "ERROR: cuda_plugin.so not installed; CUDA plugin missing."
             exit 1
           fi
-          echo "OK: criu --help contains --gpu."
+
+          # (Optional) verify AMDGPU plugin too
+          if [ -f pkgroot/var/lib/criu/amdgpu_plugin.so ] || ls pkgroot/usr/lib*/criu/amdgpu_plugin.so >/dev/null 2>&1; then
+            echo "OK: Found AMDGPU plugin."
+          else
+            echo "NOTE: AMDGPU plugin not found (install libdrm-dev before build if you need it)."
+          fi
 
       - name: Build .deb (minimal packaging around official install)
         run: |
