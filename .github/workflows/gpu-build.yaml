@@ -1,4 +1,4 @@
-name: Build CRIU (GPU) + Release with .deb
+name: Build CRIU .deb (Debian packaging) + Release
 
 on:
   push:
@@ -10,107 +10,84 @@ permissions:
   contents: write
 
 jobs:
-  build-ubuntu-24:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
     env:
-      DEB_PKGNAME: criu
+      PKGNAME: criu
     steps:
-      - name: Checkout
+      - name: Checkout (your fork)
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install build deps
+      - name: Enable deb-src & install base packaging tools
         run: |
+          sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
           sudo apt-get update
-          # CRIU build deps (from official docs)
-          sudo apt-get install -y \
-            build-essential pkg-config git \
-            protobuf-compiler libprotobuf-dev \
-            protobuf-c-compiler libprotobuf-c-dev python3-protobuf \
-            libnl-3-dev libnl-route-3-dev \
-            libcap-dev libbsd-dev libmnl-dev libaio-dev \
-            libnet1-dev libgnutls28-dev \
-            asciidoc xmlto iproute2 \
-            uuid-dev python3-yaml libdrm-dev libnftables-dev
-          # packager for quick .deb creation
-          sudo apt-get install -y checkinstall
+          sudo apt-get install -y devscripts equivs git ca-certificates \
+                                  build-essential fakeroot dpkg-dev
 
-      - name: Build CRIU
+      - name: Fetch Debian packaging (debian/ directory)
         run: |
-          make -j"$(nproc)"
-          ./criu --version || true
-          # Show GPU flag presence in help (informational)
-          ./criu --help | grep -i -- '--gpu' || true
-          ls -l ./criu* || true
+          git clone --depth 1 https://salsa.debian.org/debian/criu.git debian-pkg
+          # Copy the official debian/ into your working tree
+          rm -rf debian
+          cp -a debian-pkg/debian ./debian
 
-      - name: Compute versioning
+      - name: Compute version metadata
         id: ver
         run: |
-          ARCH="$(dpkg --print-architecture)"
-          TRIPLET="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
-          DESC="$(git describe --tags --always --dirty || true)"
           DATE="$(date -u +'%Y%m%d%H%M')"
-          # Prefer tag name when available; fall back to git describe
+          DESC="$(git describe --tags --always --dirty || true)"
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#v}"
+            PRERELEASE="false"
+            NAME="CRIU ${TAG}"
           else
-            VERSION="0.0.${DATE}-${DESC}"
+            VERSION="0.0~git${DATE}-${DESC}"
+            PRERELEASE="true"
+            NAME="Nightly build ${DATE}"
           fi
-          echo "arch=${ARCH}" >> $GITHUB_OUTPUT
-          echo "triplet=${TRIPLET}" >> $GITHUB_OUTPUT
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "name=${NAME}" >> $GITHUB_OUTPUT
+          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
-      - name: Ensure pkgconfig dir exists
+      - name: Update debian/changelog for CI build
         run: |
-          sudo mkdir -p /usr/lib/${{ steps.ver.outputs.triplet }}/pkgconfig
+          export DEBFULLNAME="${{ github.actor }}"
+          export DEBEMAIL="${{ github.actor }}@users.noreply.github.com"
+          # Create/refresh a CI changelog entry (keeps dpkg-buildpackage happy)
+          dch --create --package "$PKGNAME" --newversion "${{ steps.ver.outputs.version }}" \
+              --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          head -n 5 debian/changelog
 
-      - name: Build .deb with checkinstall (no install)
+      - name: Install build-deps from debian/control
         run: |
-          sudo mkdir -p /usr/local
-          # checkinstall wraps "make install" and captures files into a .deb
-          # We install into /usr (not /usr/local) for conventional layout.
-          sudo checkinstall -y --install=no \
-            --pkgname="${DEB_PKGNAME}" \
-            --pkgversion="${{ steps.ver.outputs.version }}" \
-            --pkgrelease="gh${GITHUB_RUN_NUMBER}" \
-            --pkglicense="GPL-2.0-or-later" \
-            --maintainer="${GITHUB_ACTOR}@users.noreply.github.com" \
-            --requires="libprotobuf-c1,libprotobuf32,libnl-3-200,libnl-route-3-200,libcap2,libbsd0,libmnl0,libaio1,libnet1,libgnutls30" \
-            --strip=no \
-            make install PREFIX=/usr LIBDIR=/usr/lib/${{ steps.ver.outputs.triplet }}
-          # Move resulting .deb to workspace root
-          DEB="$(ls -1 *.deb | head -n1)"
-          NEWNAME="${DEB%*.deb}_${{ steps.ver.outputs.arch }}.deb"
-          mv "$DEB" "$NEWNAME"
-          echo "DEB_FILE=$NEWNAME" >> $GITHUB_ENV
+          sudo mk-build-deps -i -t "apt-get -y" -r debian/control
 
-      - name: Package tarball artifacts
+      - name: Build .deb packages (dpkg-buildpackage)
         run: |
-          mkdir -p out
-          cp -v ./criu out/ || true
-          cp -v ./criu-* out/ 2>/dev/null || true
-          tar -C out -czf "criu-build-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.arch }}.tar.gz" .
-          echo "TARBALL=criu-build-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.arch }}.tar.gz" >> $GITHUB_ENV
-          ls -lah "$TARBALL" "$DEB_FILE"
+          dpkg-buildpackage -b -us -uc
+          ls -lah ../*.deb ../*.buildinfo ../*.changes || true
 
-      - name: Upload artifacts (for cross-job use)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: criu-build-ubuntu24
+          name: criu-debs
           path: |
-            ${{ env.TARBALL }}
-            ${{ env.DEB_FILE }}
+            ../*.deb
+            ../*.buildinfo
+            ../*.changes
 
   release:
-    needs: build-ubuntu-24
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: criu-build-ubuntu24
+          name: criu-debs
           path: .
 
       - name: Decide release metadata
@@ -140,4 +117,5 @@ jobs:
           generate_release_notes: true
           files: |
             *.deb
-            *.tar.gz
+            *.buildinfo
+            *.changes
