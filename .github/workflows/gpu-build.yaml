@@ -2,7 +2,7 @@ name: Build CRIU (GPU) + Release with .deb
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, criu-dev ]
     tags:
       - 'v*'
 
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-ubuntu-24:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       DEB_PKGNAME: criu
     steps:
