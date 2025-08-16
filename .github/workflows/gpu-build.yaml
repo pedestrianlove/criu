@@ -31,7 +31,8 @@ jobs:
             libnl-3-dev libnl-route-3-dev \
             libcap-dev libbsd-dev libmnl-dev libaio-dev \
             libnet1-dev libgnutls28-dev \
-            asciidoc xmlto iproute2
+            asciidoc xmlto iproute2 \
+            uuid-dev python3-yaml
           # packager for quick .deb creation
           sudo apt-get install -y checkinstall
 
