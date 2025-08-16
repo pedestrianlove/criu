@@ -1,10 +1,9 @@
-name: Build CRIU .deb (Debian packaging) + Release
+name: Build CRIU .deb on Ubuntu (NV GPU support) + Release
 
 on:
   push:
     branches: [ main, master, criu-dev ]
-    tags:
-      - 'v*'
+    tags: [ 'v*' ]
 
 permissions:
   contents: write
@@ -13,56 +12,59 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     env:
-      PKGNAME: criu
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Checkout (your fork)
+      - name: Checkout your fork
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Enable deb-src & install base packaging tools
+      - name: Enable deb-src & base tools
         run: |
           sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
           sudo apt-get update
-          sudo apt-get install -y devscripts equivs git ca-certificates \
-                                  build-essential fakeroot dpkg-dev
+          sudo apt-get install -y devscripts build-essential fakeroot dpkg-dev equivs
 
-      - name: Fetch Debian packaging (debian/ directory)
+      - name: Fetch Ubuntu’s packaging (debian/ from Ubuntu source)
         run: |
-          git clone --depth 1 https://salsa.debian.org/debian/criu.git debian-pkg
-          # Copy the official debian/ into your working tree
-          rm -rf debian
-          cp -a debian-pkg/debian ./debian
+          apt-get source -y criu
+          UBUDIR="$(ls -d criu-*/ | head -n1)"
+          rm -rf ./debian
+          cp -a "${UBUDIR}/debian" ./debian
 
-      - name: Read version from debian/changelog
-        id: meta
+      - name: Install Ubuntu build-deps
         run: |
-          SRC="$(dpkg-parsechangelog -S Source)"
-          VER="$(dpkg-parsechangelog -S Version)"
-          echo "source=${SRC}" >> $GITHUB_OUTPUT
-          echo "version=${VER}" >> $GITHUB_OUTPUT
-          # Decide release flavor (tag push = normal; branch push = prerelease)
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-            echo "relname=${SRC} ${VER}" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-            echo "relname=${SRC} ${VER} (CI build)" >> $GITHUB_OUTPUT
-          fi
+          sudo apt-get update
+          # Ubuntu’s view of CRIU build-deps (keeps us aligned with Ubuntu rules)
+          sudo apt-get build-dep -y criu
+          # Optional: include AMD GPU plugin support too (not required for NV)
+          sudo apt-get install -y libdrm-dev || true
+          # Speed up builds if supported by rules
+          echo "DEB_BUILD_OPTIONS=nodoc nocheck" >> $GITHUB_ENV
 
-      - name: Install build-deps from debian/control
+      - name: Build .deb with dpkg-buildpackage
         run: |
-          sudo mk-build-deps -i -t "apt-get -y" -r debian/control
-
-      - name: Build .deb packages (dpkg-buildpackage)
-        run: |
+          SRC="$(dpkg-parsechangelog -S Source || true)"
+          VER="$(dpkg-parsechangelog -S Version || true)"
+          echo "Building ${SRC:-criu} ${VER}"
           dpkg-buildpackage -b -us -uc
-          ls -lah ../*.deb ../*.buildinfo ../*.changes || true
+          ls -lah ../*.deb ../*.buildinfo ../*.changes
+
+      - name: Verify NV GPU support (fail if --gpu missing)
+        run: |
+          # Unpack the just-built binary to inspect it
+          DEB="$(ls ../*.deb | head -n1)"
+          mkdir -p _inspect && dpkg-deb -x "$DEB" _inspect
+          if ! _inspect/usr/sbin/criu --help | grep -q -- '--gpu'; then
+            echo "ERROR: Built criu does not advertise --gpu. NV GPU support not present."
+            exit 1
+          fi
+          echo "OK: criu --help contains --gpu (NV GPU path present)."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: criu-debs
+          name: ubuntu-debs
           path: |
             ../*.deb
             ../*.buildinfo
@@ -75,7 +77,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: criu-debs
+          name: ubuntu-debs
           path: .
 
       - name: Decide release metadata
@@ -83,28 +85,27 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            NAME="CRIU ${TAG}"
+            NAME="CRIU ${TAG} (Ubuntu build, NV GPU support)"
             PRERELEASE="false"
           else
             DATE="$(date -u +'%Y%m%d-%H%M%SZ')"
             SHORT_SHA="${GITHUB_SHA::7}"
-            TAG="nightly-${DATE}-${SHORT_SHA}"
-            NAME="Nightly build ${DATE} (${SHORT_SHA})"
+            TAG="ubuntu-nightly-${DATE}-${SHORT_SHA}"
+            NAME="Ubuntu nightly ${DATE} (${SHORT_SHA}) — NV GPU support"
             PRERELEASE="true"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "name=${NAME}" >> $GITHUB_OUTPUT
           echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release and upload assets
+      - name: Create GitHub Release and upload .deb
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}   # tag if pushed, or branch ref for nightlies
-          name: ${{ steps.meta.outputs.relname }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generate_release_notes: true
           files: |
             *.deb
             *.buildinfo
             *.changes
-
