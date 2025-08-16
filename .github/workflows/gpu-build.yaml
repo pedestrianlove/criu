@@ -25,6 +25,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y devscripts build-essential fakeroot dpkg-dev equivs
 
+      - name: Enable deb-src (Ubuntu 24.04 deb822)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          echo "Using codename: ${UBUNTU_CODENAME}"
+          sudo tee /etc/apt/sources.list.d/ubuntu-deb-src.sources >/dev/null <<EOF
+          Types: deb-src
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          # security pocket (deb-src)
+          sudo tee /etc/apt/sources.list.d/ubuntu-security-deb-src.sources >/dev/null <<EOF
+          Types: deb-src
+          URIs: http://security.ubuntu.com/ubuntu
+          Suites: ${UBUNTU_CODENAME}-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo apt-get update
+
       - name: Fetch Ubuntu’s packaging (debian/ from Ubuntu source)
         run: |
           apt-get source -y criu
