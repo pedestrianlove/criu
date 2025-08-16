@@ -67,25 +67,47 @@ jobs:
             echo "NOTE: AMDGPU plugin not found (install libdrm-dev before build if you need it)."
           fi
 
-      - name: Build .deb (minimal packaging around official install)
+      - name: Build .deb (Debian-compliant version + control)
+        id: deb
         run: |
+          set -euo pipefail
+
+          # version string (same as you have)
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VER="${TAG#v}"
+          else
+            DATE="$(date -u +'%Y%m%d%H%M')"
+            SHA="$(git rev-parse --short HEAD)"
+            VER="0.0~git${DATE}-${SHA}"
+          fi
+
           ARCH="$(dpkg --print-architecture)"
-          VER="$(git describe --tags --always --dirty || echo 0.0)"
+
+          # Pick correct libaio package for the runner; fall back to dual-alt
+          if apt-cache show libaio1t64 >/dev/null 2>&1; then
+            AIO_DEP="libaio1t64"
+          else
+            AIO_DEP="libaio1"
+          fi
+
           mkdir -p pkgroot/DEBIAN
           cat > pkgroot/DEBIAN/control <<EOF
           Package: criu
-          Version: 0.0~git${VER}
+          Version: ${VER}
           Section: admin
           Priority: optional
           Architecture: ${ARCH}
           Maintainer: ${GITHUB_ACTOR} <${GITHUB_ACTOR}@users.noreply.github.com>
-          Depends: libprotobuf-c1, libprotobuf32, libnl-3-200, libnl-route-3-200, libcap2, libbsd0, libmnl0, libaio1, libnet1, libgnutls30
+          Depends: libprotobuf-c1, libprotobuf32, libnl-3-200, libnl-route-3-200, libcap2, libbsd0, libmnl0, ${AIO_DEP}, libnet1, libgnutls30
           Description: CRIU (Checkpoint/Restore In Userspace) built per official guide
            Built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}
           EOF
+
           DEB="criu_${VER}_${ARCH}.deb"
           fakeroot dpkg-deb --build --root-owner-group pkgroot "$DEB"
           echo "DEB_FILE=$DEB" >> $GITHUB_ENV
+          echo "VER=$VER" >> $GITHUB_OUTPUT
           ls -lah "$DEB"
 
       - name: Upload artifacts
