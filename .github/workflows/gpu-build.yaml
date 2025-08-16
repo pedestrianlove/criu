@@ -32,7 +32,7 @@ jobs:
             libcap-dev libbsd-dev libmnl-dev libaio-dev \
             libnet1-dev libgnutls28-dev \
             asciidoc xmlto iproute2 \
-            uuid-dev python3-yaml
+            uuid-dev python3-yaml libdrm-dev libnftables-dev
           # packager for quick .deb creation
           sudo apt-get install -y checkinstall
 
@@ -48,6 +48,7 @@ jobs:
         id: ver
         run: |
           ARCH="$(dpkg --print-architecture)"
+          TRIPLET="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
           DESC="$(git describe --tags --always --dirty || true)"
           DATE="$(date -u +'%Y%m%d%H%M')"
           # Prefer tag name when available; fall back to git describe
@@ -58,7 +59,12 @@ jobs:
             VERSION="0.0.${DATE}-${DESC}"
           fi
           echo "arch=${ARCH}" >> $GITHUB_OUTPUT
+          echo "triplet=${TRIPLET}" >> $GITHUB_OUTPUT
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Ensure pkgconfig dir exists
+        run: |
+          sudo mkdir -p /usr/lib/${{ steps.ver.outputs.triplet }}/pkgconfig
 
       - name: Build .deb with checkinstall (no install)
         run: |
@@ -73,7 +79,7 @@ jobs:
             --maintainer="${GITHUB_ACTOR}@users.noreply.github.com" \
             --requires="libprotobuf-c1,libprotobuf32,libnl-3-200,libnl-route-3-200,libcap2,libbsd0,libmnl0,libaio1,libnet1,libgnutls30" \
             --strip=no \
-            make install PREFIX=/usr
+            make install PREFIX=/usr LIBDIR=/usr/lib/${{ steps.ver.outputs.triplet }}
           # Move resulting .deb to workspace root
           DEB="$(ls -1 *.deb | head -n1)"
           NEWNAME="${DEB%*.deb}_${{ steps.ver.outputs.arch }}.deb"
