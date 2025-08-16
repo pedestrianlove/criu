@@ -74,7 +74,7 @@ jobs:
           mkdir -p pkgroot/DEBIAN
           cat > pkgroot/DEBIAN/control <<EOF
           Package: criu
-          Version: ${VER}
+          Version: 0.0~git${VER}
           Section: admin
           Priority: optional
           Architecture: ${ARCH}
