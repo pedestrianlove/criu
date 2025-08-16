@@ -1,0 +1,136 @@
+name: Build CRIU (GPU) + Release with .deb
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ubuntu-24:
+    runs-on: ubuntu-24.04
+    env:
+      DEB_PKGNAME: criu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          # CRIU build deps (from official docs)
+          sudo apt-get install -y \
+            build-essential pkg-config git \
+            protobuf-compiler libprotobuf-dev \
+            protobuf-c-compiler libprotobuf-c-dev python3-protobuf \
+            libnl-3-dev libnl-route-3-dev \
+            libcap-dev libbsd-dev libmnl-dev libaio-dev \
+            libnet1-dev libgnutls28-dev \
+            asciidoc xmlto iproute2
+          # packager for quick .deb creation
+          sudo apt-get install -y checkinstall
+
+      - name: Build CRIU
+        run: |
+          make -j"$(nproc)"
+          ./criu --version || true
+          # Show GPU flag presence in help (informational)
+          ./criu --help | grep -i -- '--gpu' || true
+          ls -l ./criu* || true
+
+      - name: Compute versioning
+        id: ver
+        run: |
+          ARCH="$(dpkg --print-architecture)"
+          DESC="$(git describe --tags --always --dirty || true)"
+          DATE="$(date -u +'%Y%m%d%H%M')"
+          # Prefer tag name when available; fall back to git describe
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="0.0.${DATE}-${DESC}"
+          fi
+          echo "arch=${ARCH}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build .deb with checkinstall (no install)
+        run: |
+          sudo mkdir -p /usr/local
+          # checkinstall wraps "make install" and captures files into a .deb
+          # We install into /usr (not /usr/local) for conventional layout.
+          sudo checkinstall -y --install=no \
+            --pkgname="${DEB_PKGNAME}" \
+            --pkgversion="${{ steps.ver.outputs.version }}" \
+            --pkgrelease="gh${GITHUB_RUN_NUMBER}" \
+            --pkglicense="GPL-2.0-or-later" \
+            --maintainer="${GITHUB_ACTOR}@users.noreply.github.com" \
+            --requires="libprotobuf-c1,libprotobuf32,libnl-3-200,libnl-route-3-200,libcap2,libbsd0,libmnl0,libaio1,libnet1,libgnutls30" \
+            --strip=no \
+            make install PREFIX=/usr
+          # Move resulting .deb to workspace root
+          DEB="$(ls -1 *.deb | head -n1)"
+          NEWNAME="${DEB%*.deb}_${{ steps.ver.outputs.arch }}.deb"
+          mv "$DEB" "$NEWNAME"
+          echo "DEB_FILE=$NEWNAME" >> $GITHUB_ENV
+
+      - name: Package tarball artifacts
+        run: |
+          mkdir -p out
+          cp -v ./criu out/ || true
+          cp -v ./criu-* out/ 2>/dev/null || true
+          tar -C out -czf "criu-build-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.arch }}.tar.gz" .
+          echo "TARBALL=criu-build-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.arch }}.tar.gz" >> $GITHUB_ENV
+          ls -lah "$TARBALL" "$DEB_FILE"
+
+      - name: Upload artifacts (for cross-job use)
+        uses: actions/upload-artifact@v4
+        with:
+          name: criu-build-ubuntu24
+          path: |
+            ${{ env.TARBALL }}
+            ${{ env.DEB_FILE }}
+
+  release:
+    needs: build-ubuntu-24
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: criu-build-ubuntu24
+          path: .
+
+      - name: Decide release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            NAME="CRIU ${TAG}"
+            PRERELEASE="false"
+          else
+            DATE="$(date -u +'%Y%m%d-%H%M%SZ')"
+            SHORT_SHA="${GITHUB_SHA::7}"
+            TAG="nightly-${DATE}-${SHORT_SHA}"
+            NAME="Nightly build ${DATE} (${SHORT_SHA})"
+            PRERELEASE="true"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "name=${NAME}" >> $GITHUB_OUTPUT
+          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            *.deb
+            *.tar.gz
