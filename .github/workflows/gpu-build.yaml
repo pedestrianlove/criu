@@ -34,51 +34,21 @@ jobs:
           rm -rf debian
           cp -a debian-pkg/debian ./debian
 
-      - name: Compute version metadata
-        id: ver
+      - name: Read version from debian/changelog
+        id: meta
         run: |
-          DATE="$(date -u +'%Y%m%d%H%M')"
-          DESC="$(git describe --tags --always --dirty || true)"
+          SRC="$(dpkg-parsechangelog -S Source)"
+          VER="$(dpkg-parsechangelog -S Version)"
+          echo "source=${SRC}" >> $GITHUB_OUTPUT
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+          # Decide release flavor (tag push = normal; branch push = prerelease)
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            VERSION="${TAG#v}"
-            PRERELEASE="false"
-            NAME="CRIU ${TAG}"
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "relname=${SRC} ${VER}" >> $GITHUB_OUTPUT
           else
-            VERSION="0.0~git${DATE}-${DESC}"
-            PRERELEASE="true"
-            NAME="Nightly build ${DATE}"
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "relname=${SRC} ${VER} (CI build)" >> $GITHUB_OUTPUT
           fi
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "name=${NAME}" >> $GITHUB_OUTPUT
-          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
-
-      - name: Update debian/changelog for CI build
-        run: |
-          set -euo pipefail
-          export DEBFULLNAME="${{ github.actor }}"
-          export DEBEMAIL="${{ github.actor }}@users.noreply.github.com"
-
-          VERSION="${{ steps.ver.outputs.version }}"
-          DIST="unstable"
-
-          if [[ ! -f debian/changelog ]]; then
-            # First time: create the changelog
-            dch --create \
-                --package "$PKGNAME" \
-                --newversion "$VERSION" \
-                --distribution "$DIST" \
-                --force-distribution \
-                --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
-          else
-            # Append a new entry on top
-            dch --newversion "$VERSION" \
-                --distribution "$DIST" \
-                --force-distribution \
-                --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
-          fi
-
-          head -n 10 debian/changelog
 
       - name: Install build-deps from debian/control
         run: |
