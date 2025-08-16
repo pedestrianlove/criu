@@ -55,12 +55,30 @@ jobs:
 
       - name: Update debian/changelog for CI build
         run: |
+          set -euo pipefail
           export DEBFULLNAME="${{ github.actor }}"
           export DEBEMAIL="${{ github.actor }}@users.noreply.github.com"
-          # Create/refresh a CI changelog entry (keeps dpkg-buildpackage happy)
-          dch --create --package "$PKGNAME" --newversion "${{ steps.ver.outputs.version }}" \
-              --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
-          head -n 5 debian/changelog
+
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIST="unstable"
+
+          if [[ ! -f debian/changelog ]]; then
+            # First time: create the changelog
+            dch --create \
+                --package "$PKGNAME" \
+                --newversion "$VERSION" \
+                --distribution "$DIST" \
+                --force-distribution \
+                --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          else
+            # Append a new entry on top
+            dch --newversion "$VERSION" \
+                --distribution "$DIST" \
+                --force-distribution \
+                --empty "CI build from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          fi
+
+          head -n 10 debian/changelog
 
       - name: Install build-deps from debian/control
         run: |
