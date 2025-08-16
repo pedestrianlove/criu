@@ -1,4 +1,4 @@
-name: Build CRIU .deb on Ubuntu (NV GPU support) + Release
+name: CRIU build (official guide) + .deb release
 
 on:
   push:
@@ -13,114 +13,105 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
     steps:
-      - name: Checkout your fork
+      - name: Checkout your fork (sources per guide §2)
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Enable deb-src & base tools
-        run: |
-          sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
-          sudo apt-get update
-          sudo apt-get install -y devscripts build-essential fakeroot dpkg-dev equivs
-
-      - name: Enable deb-src (Ubuntu 24.04 deb822)
-        run: |
-          set -euo pipefail
-          . /etc/os-release
-          echo "Using codename: ${UBUNTU_CODENAME}"
-          sudo tee /etc/apt/sources.list.d/ubuntu-deb-src.sources >/dev/null <<EOF
-          Types: deb-src
-          URIs: http://archive.ubuntu.com/ubuntu/
-          Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-backports
-          Components: main restricted universe multiverse
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          EOF
-          # security pocket (deb-src)
-          sudo tee /etc/apt/sources.list.d/ubuntu-security-deb-src.sources >/dev/null <<EOF
-          Types: deb-src
-          URIs: http://security.ubuntu.com/ubuntu
-          Suites: ${UBUNTU_CODENAME}-security
-          Components: main restricted universe multiverse
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          EOF
-          sudo apt-get update
-
-      - name: Fetch Ubuntu’s packaging (debian/ from Ubuntu source)
-        run: |
-          apt-get source -y criu
-          UBUDIR="$(ls -d criu-*/ | head -n1)"
-          rm -rf ./debian
-          cp -a "${UBUDIR}/debian" ./debian
-
-      - name: Install Ubuntu build-deps
+      - name: Install build dependencies (guide §3)
         run: |
           sudo apt-get update
-          # Ubuntu’s view of CRIU build-deps (keeps us aligned with Ubuntu rules)
-          sudo apt-get build-dep -y criu
-          # Optional: include AMD GPU plugin support too (not required for NV)
+          # Protocol Buffers + other deps (guide §3.2/§3.3)
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            protobuf-compiler libprotobuf-dev \
+            protobuf-c-compiler libprotobuf-c-dev python3-protobuf \
+            libnl-3-dev libnl-route-3-dev \
+            libcap-dev libbsd-dev libmnl-dev libaio-dev \
+            libnet1-dev libgnutls28-dev \
+            iproute2 asciidoc xmlto
+          # Optional AMD plugin support noted by the guide
           sudo apt-get install -y libdrm-dev || true
-          # Speed up builds if supported by rules
-          echo "DEB_BUILD_OPTIONS=nodoc nocheck" >> $GITHUB_ENV
 
-      - name: Build .deb with dpkg-buildpackage
+      - name: Build (guide §4 “Simply run make”)
         run: |
-          SRC="$(dpkg-parsechangelog -S Source || true)"
-          VER="$(dpkg-parsechangelog -S Version || true)"
-          echo "Building ${SRC:-criu} ${VER}"
-          dpkg-buildpackage -b -us -uc
-          ls -lah ../*.deb ../*.buildinfo ../*.changes
+          make -j"$(nproc)"
 
-      - name: Verify NV GPU support (fail if --gpu missing)
+      - name: Stage install (guide §5) into DESTDIR for packaging
         run: |
-          # Unpack the just-built binary to inspect it
-          DEB="$(ls ../*.deb | head -n1)"
-          mkdir -p _inspect && dpkg-deb -x "$DEB" _inspect
-          if ! _inspect/usr/sbin/criu --help | grep -q -- '--gpu'; then
-            echo "ERROR: Built criu does not advertise --gpu. NV GPU support not present."
+          TRIPLET="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          mkdir -p pkgroot
+          make DESTDIR="$PWD/pkgroot" install PREFIX=/usr LIBDIR=/usr/lib/$TRIPLET
+          # Show staged tree
+          find pkgroot -maxdepth 3 | sort
+
+      - name: Verify NV GPU flag is present (runtime feature toggle)
+        run: |
+          if ! pkgroot/usr/sbin/criu --help | grep -q -- '--gpu'; then
+            echo "ERROR: criu --help does not show --gpu; build lacks GPU flag."
             exit 1
           fi
-          echo "OK: criu --help contains --gpu (NV GPU path present)."
+          echo "OK: criu --help contains --gpu."
+
+      - name: Build .deb (minimal packaging around official install)
+        run: |
+          ARCH="$(dpkg --print-architecture)"
+          VER="$(git describe --tags --always --dirty || echo 0.0)"
+          mkdir -p pkgroot/DEBIAN
+          cat > pkgroot/DEBIAN/control <<EOF
+          Package: criu
+          Version: ${VER}
+          Section: admin
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: ${GITHUB_ACTOR} <${GITHUB_ACTOR}@users.noreply.github.com>
+          Depends: libprotobuf-c1, libprotobuf32, libnl-3-200, libnl-route-3-200, libcap2, libbsd0, libmnl0, libaio1, libnet1, libgnutls30
+          Description: CRIU (Checkpoint/Restore In Userspace) built per official guide
+           Built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}
+          EOF
+          DEB="criu_${VER}_${ARCH}.deb"
+          fakeroot dpkg-deb --build --root-owner-group pkgroot "$DEB"
+          echo "DEB_FILE=$DEB" >> $GITHUB_ENV
+          ls -lah "$DEB"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-debs
+          name: criu-ubuntu-deb
           path: |
-            ../*.deb
-            ../*.buildinfo
-            ../*.changes
+            ${{ env.DEB_FILE }}
 
   release:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Download artifacts
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ubuntu-debs
+          name: criu-ubuntu-deb
           path: .
 
-      - name: Decide release metadata
+      - name: Release metadata
         id: meta
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            NAME="CRIU ${TAG} (Ubuntu build, NV GPU support)"
+            NAME="CRIU ${TAG} (built per official guide)"
             PRERELEASE="false"
           else
             DATE="$(date -u +'%Y%m%d-%H%M%SZ')"
             SHORT_SHA="${GITHUB_SHA::7}"
             TAG="ubuntu-nightly-${DATE}-${SHORT_SHA}"
-            NAME="Ubuntu nightly ${DATE} (${SHORT_SHA}) — NV GPU support"
+            NAME="Ubuntu nightly ${DATE} (${SHORT_SHA}) — official guide build"
             PRERELEASE="true"
           fi
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "name=${NAME}" >> $GITHUB_OUTPUT
           echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release and upload .deb
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -129,5 +120,3 @@ jobs:
           generate_release_notes: true
           files: |
             *.deb
-            *.buildinfo
-            *.changes
